@@ -1,0 +1,8 @@
+uploads = []
+outputs = []
+
+[[generated]]
+id = "eHA8w4udnb09fSyoOHzgX"
+uri = "file://artifacts/inventory-scanner/assets/images/icon.png"
+type = "image"
+title = "inventory scanner app icon"

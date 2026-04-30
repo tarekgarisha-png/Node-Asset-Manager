@@ -25,3 +25,21 @@ pnpm workspace monorepo using TypeScript. Each package manages its own dependenc
 - `pnpm --filter @workspace/api-server run dev` — run API server locally
 
 See the `pnpm-workspace` skill for workspace structure, TypeScript setup, and package details.
+
+## Artifacts
+
+### inventory-scanner (Expo mobile app)
+
+Bilingual (English/Arabic + RTL) barcode-based inventory app for retail.
+
+- **Stack**: Expo SDK 54, expo-router, React Native, AsyncStorage (no backend, fully offline)
+- **Features**:
+  - Barcode scanner with SALE/PURCHASE modes (`expo-camera` `CameraView`)
+  - Manual barcode entry (works on web)
+  - Scan queue with quantity adjustments before commit
+  - Product CRUD (`app/product-form.tsx`) with low-stock alerts
+  - Transaction history with filtering, search, and CSV export (`expo-file-system/legacy` + `expo-sharing`; web uses Blob download)
+  - Settings screen for language toggle (EN/AR)
+- **State**: `contexts/InventoryContext.tsx` (provider + `useT` hook)
+- **Storage keys**: `inventory:products:v1`, `inventory:history:v1`, `inventory:lang:v1`
+- **i18n**: `lib/i18n.ts` — `tFor(lang, key, ...args)` + `isRTLFor(lang)`. RTL handled via `flexDirection: row-reverse` and `textAlign: right`.

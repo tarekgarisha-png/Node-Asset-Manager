@@ -1,0 +1,27 @@
+kind = "mobile"
+previewPath = "/"
+title = "Inventory Scanner"
+version = "1.0.0"
+id = "artifacts/inventory-scanner"
+router = "expo-domain"
+
+[[integratedSkills]]
+name = "expo"
+version = "1.0.0"
+
+[[services]]
+ensurePreviewReachable = "/status"
+name = "expo"
+paths = [ "/" ]
+localPort = 25779
+
+[services.development]
+run = "pnpm --filter @workspace/inventory-scanner run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/inventory-scanner", "run", "build" ]
+run = [ "pnpm", "--filter", "@workspace/inventory-scanner", "run", "serve" ]
+
+[services.env]
+PORT = "25779"
+BASE_PATH = "/"
