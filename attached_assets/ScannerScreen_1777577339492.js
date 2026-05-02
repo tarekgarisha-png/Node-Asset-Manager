@@ -8,7 +8,7 @@ import { BarCodeScanner } from 'expo-barcode-scanner';
 import { Ionicons } from '@expo/vector-icons';
 import { t, isRTL } from '../utils/i18n';
 import { getProductByBarcode, commitScanQueue, getLowStockProducts } from '../utils/database';
-
+const { triggerScanFeedback, triggerErrorFeedback } = useScanFeedback();
 export default function ScannerScreen({ navigation }) {
   const [hasPermission, setHasPermission] = useState(null);
   const [scanned, setScanned]             = useState(false);
