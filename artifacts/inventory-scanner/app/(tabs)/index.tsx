@@ -2,6 +2,7 @@ import { Feather } from "@expo/vector-icons";
 import { CameraView, useCameraPermissions } from "expo-camera";
 import { router } from "expo-router";
 import React, { useCallback, useEffect, useMemo, useState } from "react";
+import { useScanFeedback } from '@/hooks/useScanFeedback';
 import {
   Alert,
   FlatList,
