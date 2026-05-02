@@ -1,635 +1,518 @@
-import { Feather } from "@expo/vector-icons";
-import * as FileSystem from "expo-file-system/legacy";
-import * as Sharing from "expo-sharing";
-import React, { useMemo, useState } from "react";
+/**
+ * app/(tabs)/history.tsx
+ *
+ * Enhanced history screen:
+ *  - Shows ALL event types: SALE, PURCHASE, REFUND, DEBT_CREATED, DEBT_PAYMENT
+ *  - Swipe-left or long-press on a SALE/DEBT_CREATED to refund
+ *  - Tap any entry → see full details + "Generate PDF" button
+ *  - Header: export history CSV + filter by type
+ */
+
+import React, { useState, useMemo, useCallback } from 'react';
 import {
-  Alert,
-  FlatList,
-  LayoutAnimation,
-  Platform,
-  StyleSheet,
-  Text,
-  TextInput,
-  TouchableOpacity,
-  UIManager,
   View,
-} from "react-native";
-import { useSafeAreaInsets } from "react-native-safe-area-context";
+  Text,
+  StyleSheet,
+  FlatList,
+  TouchableOpacity,
+  Modal,
+  Alert,
+  ScrollView,
+  TextInput,
+} from 'react-native';
+import { useInventory, HistoryEntry, TransactionType } from '@/contexts/InventoryContext';
+import { generateBillPDF } from '@/lib/generateBillPDF';
 
-import { useInventory, useT } from "@/contexts/InventoryContext";
-import { useColors } from "@/hooks/useColors";
-import { buildHistoryCSV, groupHistoryIntoBills } from "@/lib/storage";
-import type { BillGroup } from "@/lib/types";
+// ─────────────────────────────────────────────────────────────────────────────
 
-if (
-  Platform.OS === "android" &&
-  UIManager.setLayoutAnimationEnabledExperimental
-) {
-  UIManager.setLayoutAnimationEnabledExperimental(true);
-}
+const TYPE_COLORS: Record<TransactionType, string> = {
+  SALE: '#2563eb',
+  PURCHASE: '#16a34a',
+  REFUND: '#dc2626',
+  DEBT_CREATED: '#d97706',
+  DEBT_PAYMENT: '#7c3aed',
+  MANUAL_ADJUST: '#64748b',
+};
 
-type Filter = "ALL" | "SALE" | "PURCHASE" | "CREDIT";
+const TYPE_LABELS_EN: Record<TransactionType, string> = {
+  SALE: 'Sale',
+  PURCHASE: 'Purchase',
+  REFUND: 'Refund',
+  DEBT_CREATED: 'On Credit',
+  DEBT_PAYMENT: 'Payment',
+  MANUAL_ADJUST: 'Adjustment',
+};
+
+const TYPE_LABELS_AR: Record<TransactionType, string> = {
+  SALE: 'بيع',
+  PURCHASE: 'شراء',
+  REFUND: 'استرداد',
+  DEBT_CREATED: 'دين',
+  DEBT_PAYMENT: 'دفعة',
+  MANUAL_ADJUST: 'تعديل',
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
 
 export default function HistoryScreen() {
-  const colors = useColors();
-  const { t, rtl } = useT();
-  const insets = useSafeAreaInsets();
-  const { history, clearAllHistory } = useInventory();
+  const { history, refundBill, exportCSV, lang } = useInventory();
+  const isRTL = lang === 'ar';
+  const typeLabels = isRTL ? TYPE_LABELS_AR : TYPE_LABELS_EN;
 
-  const [search, setSearch] = useState<string>("");
-  const [filter, setFilter] = useState<Filter>("ALL");
-  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
+  const [selectedEntry, setSelectedEntry] = useState<HistoryEntry | null>(null);
+  const [filter, setFilter] = useState<TransactionType | 'ALL'>('ALL');
+  const [search, setSearch] = useState('');
 
-  const bills = useMemo(() => groupHistoryIntoBills(history), [history]);
+  const labels = {
+    en: {
+      title: 'History',
+      export: 'Export CSV',
+      all: 'All',
+      noEntries: 'No entries yet',
+      detail: 'Transaction Details',
+      items: 'Items',
+      total: 'Total',
+      paid: 'Paid',
+      owed: 'Owed',
+      customer: 'Customer',
+      refund: 'Refund This Bill',
+      pdf: 'Generate PDF',
+      close: 'Close',
+      refundConfirm: 'Refund this bill? Stock will be restored.',
+      refundOk: 'Yes, Refund',
+      cancel: 'Cancel',
+      search: 'Search customer or item...',
+      note: 'Note',
+      paymentAmount: 'Payment Amount',
+    },
+    ar: {
+      title: 'السجل',
+      export: 'تصدير CSV',
+      all: 'الكل',
+      noEntries: 'لا توجد سجلات بعد',
+      detail: 'تفاصيل المعاملة',
+      items: 'الأصناف',
+      total: 'الإجمالي',
+      paid: 'المدفوع',
+      owed: 'المتبقي',
+      customer: 'العميل',
+      refund: 'استرداد هذه الفاتورة',
+      pdf: 'إنشاء PDF',
+      close: 'إغلاق',
+      refundConfirm: 'استرداد هذه الفاتورة؟ سيتم استعادة المخزون.',
+      refundOk: 'نعم، استرداد',
+      cancel: 'إلغاء',
+      search: 'ابحث عن عميل أو صنف...',
+      note: 'ملاحظة',
+      paymentAmount: 'مبلغ الدفعة',
+    },
+  }[lang];
 
-  const filteredBills = useMemo(() => {
-    let list =
-      filter === "ALL" ? bills : bills.filter((b) => b.type === filter);
+  const filtered = useMemo(() => {
+    let items = history;
+    if (filter !== 'ALL') items = items.filter((h) => h.type === filter);
     if (search.trim()) {
       const q = search.toLowerCase();
-      list = list.filter(
-        (b) =>
-          b.personName?.toLowerCase().includes(q) ||
-          b.items.some(
-            (h) =>
-              h.name.toLowerCase().includes(q) ||
-              h.barcode.includes(q),
-          ),
+      items = items.filter(
+        (h) =>
+          h.customerName?.toLowerCase().includes(q) ||
+          h.items?.some((i) => i.name.toLowerCase().includes(q) || i.arabicName?.includes(q)) ||
+          h.note?.toLowerCase().includes(q)
       );
     }
-    return list;
-  }, [bills, search, filter]);
+    return items;
+  }, [history, filter, search]);
 
-  const fmtDate = (iso: string) => {
-    const d = new Date(iso);
-    const date = d.toLocaleDateString();
-    const time = d.toLocaleTimeString([], {
-      hour: "2-digit",
-      minute: "2-digit",
-    });
-    return `${date}  ${time}`;
-  };
-
-  const totals = useMemo(() => {
-    let sold = 0, purchased = 0, credit = 0;
-    history.forEach((h) => {
-      if (h.type === "SALE") sold += h.amount ?? 0;
-      else if (h.type === "PURCHASE") purchased += h.amount ?? 0;
-      else if (h.type === "CREDIT" && !h.paid) credit += h.amount ?? 0;
-    });
-    return { sold, purchased, credit };
-  }, [history]);
-
-  const toggleBill = (sessionId: string) => {
-    LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
-    setExpanded((prev) => ({ ...prev, [sessionId]: !prev[sessionId] }));
-  };
-
-  const exportCSV = async () => {
-    try {
-      const data = history;
-      if (!data.length) {
-        Alert.alert("", t("emptyExport"));
-        return;
-      }
-      const csv = buildHistoryCSV(data);
-
-      if (Platform.OS === "web") {
-        const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement("a");
-        a.href = url;
-        a.download = `history_${Date.now()}.csv`;
-        a.click();
-        URL.revokeObjectURL(url);
-        return;
-      }
-
-      const path = `${FileSystem.documentDirectory}history_${Date.now()}.csv`;
-      await FileSystem.writeAsStringAsync(path, csv, {
-        encoding: FileSystem.EncodingType.UTF8,
-      });
-      const ok = await Sharing.isAvailableAsync();
-      if (!ok) {
-        Alert.alert("", t("noSharing"));
-        return;
-      }
-      await Sharing.shareAsync(path, {
-        mimeType: "text/csv",
-        dialogTitle: t("exportCSV"),
-      });
-    } catch {
-      Alert.alert(t("exportFailed"), "");
-    }
-  };
-
-  const handleClear = () => {
-    Alert.alert(t("clearHistory"), t("clearHistoryMsg"), [
-      { text: t("cancel"), style: "cancel" },
-      {
-        text: t("deleteAll"),
-        style: "destructive",
-        onPress: async () => {
-          await clearAllHistory();
+  const handleRefund = useCallback(
+    (entry: HistoryEntry) => {
+      Alert.alert(labels.refundConfirm, '', [
+        { text: labels.cancel, style: 'cancel' },
+        {
+          text: labels.refundOk,
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              await refundBill(entry.id);
+              setSelectedEntry(null);
+            } catch (e: any) {
+              Alert.alert('Error', e.message);
+            }
+          },
         },
-      },
-    ]);
-  };
+      ]);
+    },
+    [refundBill, labels]
+  );
 
-  const headerTopPadding = Platform.OS === "web" ? 67 : insets.top + 8;
-  const styles = useStyles();
+  const canRefund = (entry: HistoryEntry) =>
+    (entry.type === 'SALE' || entry.type === 'DEBT_CREATED') &&
+    !entry.note?.startsWith('[REFUNDED]');
 
-  const renderBill = ({ item }: { item: BillGroup }) => {
-    const isOpen = !!expanded[item.sessionId];
-    const isSale = item.type === "SALE";
-    const isCredit = item.type === "CREDIT";
-    const typeColor = isCredit
-      ? colors.warning
-      : isSale
-        ? colors.destructive
-        : colors.success;
-    const bgIcon = isCredit ? "#fef3c7" : isSale ? "#fee2e2" : "#dcfce7";
-    const sign = item.type === "PURCHASE" ? "+" : "−";
-    const isMulti = item.items.length > 1;
+  const renderEntry = useCallback(
+    ({ item }: { item: HistoryEntry }) => {
+      const color = TYPE_COLORS[item.type];
+      const label = typeLabels[item.type];
+      const refunded = item.note?.startsWith('[REFUNDED]');
 
-    return (
-      <View style={[styles.billCard, { backgroundColor: colors.card }]}>
+      return (
         <TouchableOpacity
-          activeOpacity={isMulti ? 0.7 : 1}
-          onPress={() => isMulti && toggleBill(item.sessionId)}
-          style={[styles.billHeader, rtl && styles.rowReverse]}
+          style={[styles.card, refunded && styles.refundedCard]}
+          onPress={() => setSelectedEntry(item)}
+          activeOpacity={0.75}
         >
-          <View style={[styles.typeIcon, { backgroundColor: bgIcon }]}>
-            <Feather
-              name={isCredit ? "user" : isSale ? "arrow-up" : "arrow-down"}
-              size={16}
-              color={typeColor}
-            />
+          <View style={[styles.typeTag, { backgroundColor: color }]}>
+            <Text style={styles.typeTagText}>{label}</Text>
           </View>
-          <View style={styles.billInfo}>
-            {isCredit && item.personName ? (
-              <Text
-                style={[
-                  styles.billPerson,
-                  { color: colors.warning },
-                  rtl && styles.rtlText,
-                ]}
-                numberOfLines={1}
-              >
-                {item.personName}
+          <View style={{ flex: 1 }}>
+            <Text style={[styles.entryDate, isRTL && styles.rtl]}>
+              {new Date(item.timestamp).toLocaleString()}
+            </Text>
+            {item.customerName ? (
+              <Text style={[styles.customerText, isRTL && styles.rtl]}>
+                {item.customerName}
               </Text>
             ) : null}
-            {isMulti ? (
-              <Text
-                style={[
-                  styles.billName,
-                  { color: colors.foreground },
-                  rtl && styles.rtlText,
-                ]}
-              >
-                {t("billItems", item.items.length)}
+            {item.items && item.items.length > 0 ? (
+              <Text style={[styles.itemSummary, isRTL && styles.rtl]} numberOfLines={1}>
+                {item.items.map((i) => `${isRTL && i.arabicName ? i.arabicName : i.name} ×${i.quantity}`).join(', ')}
               </Text>
-            ) : (
-              <Text
-                style={[
-                  styles.billName,
-                  { color: colors.foreground },
-                  rtl && styles.rtlText,
-                ]}
-                numberOfLines={1}
-              >
-                {item.items[0]?.name ?? ""}
+            ) : null}
+            {item.paymentAmount !== undefined ? (
+              <Text style={[styles.itemSummary, isRTL && styles.rtl]}>
+                {labels.paymentAmount}: {item.paymentAmount.toFixed(2)}
               </Text>
-            )}
-            <Text
-              style={[
-                styles.billDate,
-                { color: colors.mutedForeground },
-                rtl && styles.rtlText,
-              ]}
-            >
-              {fmtDate(item.date)}
-            </Text>
+            ) : null}
           </View>
-          <View style={styles.billRight}>
-            <Text style={[styles.billQty, { color: typeColor }]}>
-              {sign}{item.totalQty}
-            </Text>
-            {item.totalAmount > 0 && (
-              <Text style={[styles.billAmount, { color: colors.foreground }]}>
+          <View style={styles.amountCol}>
+            {item.totalAmount !== undefined ? (
+              <Text style={[styles.amount, { color }]}>
                 {item.totalAmount.toFixed(2)}
               </Text>
-            )}
-            {isCredit && (
-              <View
-                style={[
-                  styles.paidBadge,
-                  {
-                    backgroundColor: item.paid ? "#dcfce7" : "#fef3c7",
-                  },
-                ]}
-              >
-                <Text
-                  style={{
-                    color: item.paid ? "#166534" : "#b45309",
-                    fontSize: 8,
-                    fontWeight: "800",
-                    letterSpacing: 0.4,
-                  }}
-                >
-                  {item.paid ? t("paid") : t("unpaid")}
-                </Text>
-              </View>
-            )}
-            {isMulti && (
-              <Feather
-                name={isOpen ? "chevron-up" : "chevron-down"}
-                size={14}
-                color={colors.mutedForeground}
-              />
-            )}
+            ) : item.paymentAmount !== undefined ? (
+              <Text style={[styles.amount, { color }]}>
+                {item.paymentAmount.toFixed(2)}
+              </Text>
+            ) : null}
+            {refunded ? (
+              <Text style={styles.refundedTag}>↩</Text>
+            ) : null}
           </View>
         </TouchableOpacity>
+      );
+    },
+    [lang, typeLabels, labels, isRTL]
+  );
 
-        {isOpen && (
-          <View
-            style={[
-              styles.billItems,
-              { borderTopColor: colors.border },
-            ]}
-          >
-            {item.items.map((h) => (
-              <View
-                key={h.id}
-                style={[styles.lineRow, rtl && styles.rowReverse]}
-              >
-                <View style={{ flex: 1 }}>
-                  <Text
-                    style={[
-                      styles.lineName,
-                      { color: colors.foreground },
-                      rtl && styles.rtlText,
-                    ]}
-                    numberOfLines={1}
-                  >
-                    {h.name}
-                  </Text>
-                  {(h.unitPrice ?? 0) > 0 && (
-                    <Text
-                      style={[
-                        styles.lineMeta,
-                        { color: colors.mutedForeground },
-                        rtl && styles.rtlText,
-                      ]}
-                    >
-                      {h.qty} × {(h.unitPrice ?? 0).toFixed(2)}
-                    </Text>
-                  )}
-                </View>
-                <Text style={[styles.lineAmount, { color: typeColor }]}>
-                  {sign}{h.qty}
-                  {(h.amount ?? 0) > 0
-                    ? `  ${(h.amount ?? 0).toFixed(2)}`
-                    : ""}
-                </Text>
-              </View>
-            ))}
-          </View>
-        )}
-      </View>
-    );
-  };
+  // Filter tabs
+  const filterTypes: Array<TransactionType | 'ALL'> = [
+    'ALL', 'SALE', 'PURCHASE', 'REFUND', 'DEBT_CREATED', 'DEBT_PAYMENT',
+  ];
 
   return (
-    <View style={[styles.container, { backgroundColor: colors.background }]}>
-      <View
-        style={[
-          styles.header,
-          {
-            paddingTop: headerTopPadding,
-            backgroundColor: colors.card,
-            borderColor: colors.border,
-          },
-        ]}
-      >
-        <Text
-          style={[
-            styles.headerTitle,
-            { color: colors.foreground },
-            rtl && styles.rtlText,
-          ]}
-        >
-          {t("historyTitle")}
-        </Text>
-
-        <View style={[styles.summary, rtl && styles.rowReverse]}>
-          <SumItem
-            num={totals.sold.toFixed(0)}
-            label={t("sold")}
-            color={colors.destructive}
-            mutedColor={colors.mutedForeground}
-          />
-          <View style={[styles.divider, { backgroundColor: colors.border }]} />
-          <SumItem
-            num={totals.purchased.toFixed(0)}
-            label={t("purchased")}
-            color={colors.success}
-            mutedColor={colors.mutedForeground}
-          />
-          <View style={[styles.divider, { backgroundColor: colors.border }]} />
-          <SumItem
-            num={totals.credit.toFixed(0)}
-            label={t("credit")}
-            color={colors.warning}
-            mutedColor={colors.mutedForeground}
-          />
-          <TouchableOpacity
-            style={[styles.csvBtn, { backgroundColor: colors.primary }]}
-            onPress={exportCSV}
-          >
-            <Feather name="download" size={14} color="white" />
-            <Text style={styles.csvText}>CSV</Text>
-          </TouchableOpacity>
-        </View>
+    <View style={styles.container}>
+      {/* Header */}
+      <View style={styles.header}>
+        <Text style={styles.title}>{labels.title}</Text>
+        <TouchableOpacity style={styles.exportBtn} onPress={() => exportCSV('history')}>
+          <Text style={styles.exportBtnText}>{labels.export}</Text>
+        </TouchableOpacity>
       </View>
 
-      <View
-        style={[
-          styles.tabs,
-          { backgroundColor: colors.card, borderColor: colors.border },
-          rtl && styles.rowReverse,
-        ]}
-      >
-        {(
-          [
-            { key: "ALL", label: t("all") },
-            { key: "SALE", label: t("sale") },
-            { key: "PURCHASE", label: t("purchase") },
-            { key: "CREDIT", label: t("credit") },
-          ] as { key: Filter; label: string }[]
-        ).map((tab) => {
-          const active = filter === tab.key;
-          return (
-            <TouchableOpacity
-              key={tab.key}
-              style={[
-                styles.tab,
-                { backgroundColor: active ? colors.primary : colors.secondary },
-              ]}
-              onPress={() => setFilter(tab.key)}
-            >
-              <Text
-                style={[
-                  styles.tabText,
-                  {
-                    color: active ? "white" : colors.mutedForeground,
-                  },
-                ]}
-              >
-                {tab.label}
-              </Text>
-            </TouchableOpacity>
-          );
-        })}
-      </View>
-
-      <View
-        style={[
-          styles.searchWrap,
-          { backgroundColor: colors.card, borderColor: colors.border },
-          rtl && styles.rowReverse,
-        ]}
-      >
-        <Feather name="search" size={16} color={colors.mutedForeground} />
+      {/* Search */}
+      <View style={styles.searchRow}>
         <TextInput
-          style={[
-            styles.searchInput,
-            { color: colors.foreground },
-            rtl && styles.rtlInput,
-          ]}
-          placeholder={t("searchHistory")}
+          style={styles.searchInput}
+          placeholder={labels.search}
           value={search}
           onChangeText={setSearch}
-          placeholderTextColor={colors.mutedForeground}
-          textAlign={rtl ? "right" : "left"}
+          clearButtonMode="while-editing"
         />
-        {!!search && (
-          <TouchableOpacity onPress={() => setSearch("")}>
-            <Feather name="x-circle" size={16} color={colors.mutedForeground} />
-          </TouchableOpacity>
-        )}
       </View>
 
-      {filteredBills.length === 0 ? (
-        <View style={styles.empty}>
-          <Feather name="clock" size={48} color={colors.border} />
-          <Text
-            style={[
-              styles.emptyText,
-              { color: colors.mutedForeground },
-              rtl && styles.rtlText,
-            ]}
-          >
-            {t("noHistory")}
-          </Text>
-        </View>
-      ) : (
-        <FlatList
-          data={filteredBills}
-          keyExtractor={(b) => b.sessionId}
-          contentContainerStyle={{
-            padding: 12,
-            paddingBottom: insets.bottom + 90,
-          }}
-          renderItem={renderBill}
-        />
-      )}
-
-      {history.length > 0 && (
-        <TouchableOpacity
-          style={[
-            styles.clearBtn,
-            {
-              backgroundColor: "#fef2f2",
-              borderColor: "#fca5a5",
-              marginBottom: insets.bottom + 80,
-            },
-          ]}
-          onPress={handleClear}
-        >
-          <Feather name="trash-2" size={14} color={colors.destructive} />
-          <Text
-            style={[
-              styles.clearText,
-              { color: colors.destructive },
-              rtl && styles.rtlText,
-            ]}
-          >
-            {t("clearHistory")}
-          </Text>
-        </TouchableOpacity>
-      )}
-    </View>
-  );
-}
-
-function SumItem({
-  num,
-  label,
-  color,
-  mutedColor,
-}: {
-  num: string;
-  label: string;
-  color: string;
-  mutedColor: string;
-}) {
-  return (
-    <View style={{ flex: 1, alignItems: "center" }}>
-      <Text style={{ fontSize: 16, fontWeight: "800", color }}>{num}</Text>
-      <Text
-        style={{
-          fontSize: 9,
-          color: mutedColor,
-          textTransform: "uppercase",
-          letterSpacing: 0.4,
-          fontWeight: "600",
-        }}
+      {/* Filter tabs */}
+      <ScrollView
+        horizontal
+        showsHorizontalScrollIndicator={false}
+        style={styles.filterScroll}
+        contentContainerStyle={{ paddingHorizontal: 12, gap: 8, paddingVertical: 8 }}
       >
-        {label}
-      </Text>
+        {filterTypes.map((ft) => (
+          <TouchableOpacity
+            key={ft}
+            style={[
+              styles.filterChip,
+              filter === ft && {
+                backgroundColor:
+                  ft === 'ALL' ? '#1a1a1a' : TYPE_COLORS[ft as TransactionType],
+              },
+            ]}
+            onPress={() => setFilter(ft)}
+          >
+            <Text
+              style={[
+                styles.filterChipText,
+                filter === ft && styles.filterChipTextActive,
+              ]}
+            >
+              {ft === 'ALL' ? labels.all : typeLabels[ft as TransactionType]}
+            </Text>
+          </TouchableOpacity>
+        ))}
+      </ScrollView>
+
+      {/* List */}
+      <FlatList
+        data={filtered}
+        keyExtractor={(item) => item.id}
+        renderItem={renderEntry}
+        contentContainerStyle={{ padding: 12, paddingBottom: 40 }}
+        ListEmptyComponent={
+          <Text style={styles.emptyText}>{labels.noEntries}</Text>
+        }
+      />
+
+      {/* Detail Modal */}
+      <Modal
+        visible={!!selectedEntry}
+        animationType="slide"
+        transparent
+        onRequestClose={() => setSelectedEntry(null)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalBox}>
+            <ScrollView>
+              <Text style={styles.modalTitle}>{labels.detail}</Text>
+              {selectedEntry && (
+                <>
+                  <View
+                    style={[
+                      styles.typeTag,
+                      { backgroundColor: TYPE_COLORS[selectedEntry.type], alignSelf: 'flex-start', marginBottom: 12 },
+                    ]}
+                  >
+                    <Text style={styles.typeTagText}>
+                      {typeLabels[selectedEntry.type]}
+                    </Text>
+                  </View>
+                  <Text style={styles.detailRow}>
+                    {new Date(selectedEntry.timestamp).toLocaleString()}
+                  </Text>
+                  {selectedEntry.customerName ? (
+                    <Text style={styles.detailRow}>
+                      {labels.customer}: {selectedEntry.customerName}
+                    </Text>
+                  ) : null}
+                  {selectedEntry.note ? (
+                    <Text style={[styles.detailRow, { color: '#888' }]}>
+                      {labels.note}: {selectedEntry.note}
+                    </Text>
+                  ) : null}
+
+                  {/* Items */}
+                  {selectedEntry.items && selectedEntry.items.length > 0 && (
+                    <>
+                      <Text style={styles.sectionLabel}>{labels.items}</Text>
+                      {selectedEntry.items.map((item, idx) => (
+                        <View key={idx} style={styles.itemRow}>
+                          <Text style={styles.itemName}>
+                            {isRTL && item.arabicName ? item.arabicName : item.name}
+                          </Text>
+                          <Text style={styles.itemQty}>×{item.quantity}</Text>
+                          <Text style={styles.itemPrice}>
+                            {(item.quantity * item.unitPrice).toFixed(2)}
+                          </Text>
+                        </View>
+                      ))}
+                      <View style={styles.divider} />
+                    </>
+                  )}
+
+                  {/* Totals */}
+                  {selectedEntry.totalAmount !== undefined ? (
+                    <View style={styles.totalRow}>
+                      <Text style={styles.totalLabel}>{labels.total}</Text>
+                      <Text style={styles.totalValue}>
+                        {selectedEntry.totalAmount.toFixed(2)}
+                      </Text>
+                    </View>
+                  ) : null}
+                  {selectedEntry.amountPaid !== undefined &&
+                    selectedEntry.amountPaid !== selectedEntry.totalAmount ? (
+                    <View style={styles.totalRow}>
+                      <Text style={styles.totalLabel}>{labels.paid}</Text>
+                      <Text style={[styles.totalValue, { color: '#16a34a' }]}>
+                        {selectedEntry.amountPaid.toFixed(2)}
+                      </Text>
+                    </View>
+                  ) : null}
+                  {(selectedEntry.amountOwed ?? 0) > 0 ? (
+                    <View style={styles.totalRow}>
+                      <Text style={styles.totalLabel}>{labels.owed}</Text>
+                      <Text style={[styles.totalValue, { color: '#dc2626' }]}>
+                        {selectedEntry.amountOwed!.toFixed(2)}
+                      </Text>
+                    </View>
+                  ) : null}
+                  {selectedEntry.paymentAmount !== undefined ? (
+                    <View style={styles.totalRow}>
+                      <Text style={styles.totalLabel}>{labels.paymentAmount}</Text>
+                      <Text style={[styles.totalValue, { color: '#7c3aed' }]}>
+                        {selectedEntry.paymentAmount.toFixed(2)}
+                      </Text>
+                    </View>
+                  ) : null}
+                </>
+              )}
+            </ScrollView>
+
+            {/* Actions */}
+            <View style={styles.modalActions}>
+              {selectedEntry && canRefund(selectedEntry) && (
+                <TouchableOpacity
+                  style={[styles.actionBtn, { backgroundColor: '#dc2626' }]}
+                  onPress={() => handleRefund(selectedEntry)}
+                >
+                  <Text style={styles.actionBtnText}>↩ {labels.refund}</Text>
+                </TouchableOpacity>
+              )}
+              {selectedEntry &&
+                (selectedEntry.type === 'SALE' ||
+                  selectedEntry.type === 'DEBT_CREATED' ||
+                  selectedEntry.type === 'PURCHASE') && (
+                  <TouchableOpacity
+                    style={[styles.actionBtn, { backgroundColor: '#2563eb' }]}
+                    onPress={() => generateBillPDF(selectedEntry, lang)}
+                  >
+                    <Text style={styles.actionBtnText}>📄 {labels.pdf}</Text>
+                  </TouchableOpacity>
+                )}
+              <TouchableOpacity
+                style={[styles.actionBtn, { backgroundColor: '#555' }]}
+                onPress={() => setSelectedEntry(null)}
+              >
+                <Text style={styles.actionBtnText}>{labels.close}</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 }
 
-function useStyles() {
-  return StyleSheet.create({
-    container: { flex: 1 },
-    rtlText: { textAlign: "right", writingDirection: "rtl" },
-    rtlInput: { textAlign: "right" },
-    rowReverse: { flexDirection: "row-reverse" },
+// ─── Styles ───────────────────────────────────────────────────────────────────
 
-    header: {
-      paddingHorizontal: 18,
-      paddingBottom: 14,
-      borderBottomWidth: 1,
-      gap: 14,
-    },
-    headerTitle: { fontSize: 24, fontWeight: "800", fontFamily: "Inter_700Bold" },
-    summary: {
-      flexDirection: "row",
-      alignItems: "center",
-      gap: 6,
-    },
-    divider: { width: 1, height: 28 },
-    csvBtn: {
-      flexDirection: "row",
-      alignItems: "center",
-      gap: 5,
-      paddingHorizontal: 11,
-      paddingVertical: 7,
-      borderRadius: 8,
-    },
-    csvText: { color: "white", fontWeight: "700", fontSize: 11 },
-
-    tabs: {
-      flexDirection: "row",
-      paddingHorizontal: 12,
-      paddingTop: 12,
-      paddingBottom: 10,
-      gap: 6,
-      borderBottomWidth: 1,
-    },
-    tab: {
-      paddingHorizontal: 12,
-      paddingVertical: 7,
-      borderRadius: 20,
-    },
-    tabText: { fontSize: 11, fontWeight: "700" },
-
-    searchWrap: {
-      flexDirection: "row",
-      alignItems: "center",
-      gap: 8,
-      margin: 12,
-      borderRadius: 10,
-      paddingHorizontal: 12,
-      borderWidth: 1,
-    },
-    searchInput: { flex: 1, paddingVertical: 10, fontSize: 14 },
-
-    empty: {
-      flex: 1,
-      justifyContent: "center",
-      alignItems: "center",
-      gap: 12,
-      paddingHorizontal: 24,
-    },
-    emptyText: { fontSize: 15 },
-
-    billCard: {
-      borderRadius: 12,
-      marginBottom: 8,
-      overflow: "hidden",
-      shadowColor: "#000",
-      shadowOpacity: 0.04,
-      shadowOffset: { width: 0, height: 1 },
-      shadowRadius: 3,
-      elevation: 1,
-    },
-    billHeader: {
-      flexDirection: "row",
-      alignItems: "center",
-      padding: 12,
-      gap: 10,
-    },
-    typeIcon: {
-      width: 36,
-      height: 36,
-      borderRadius: 10,
-      justifyContent: "center",
-      alignItems: "center",
-    },
-    billInfo: { flex: 1 },
-    billPerson: { fontSize: 11, fontWeight: "700", marginBottom: 1 },
-    billName: { fontWeight: "700", fontSize: 13 },
-    billDate: { fontSize: 10, marginTop: 1 },
-    billRight: { alignItems: "flex-end", gap: 2 },
-    billQty: { fontSize: 16, fontWeight: "800" },
-    billAmount: { fontSize: 12, fontWeight: "700" },
-    paidBadge: {
-      paddingHorizontal: 6,
-      paddingVertical: 2,
-      borderRadius: 6,
-      marginTop: 2,
-    },
-
-    billItems: {
-      borderTopWidth: 1,
-      paddingHorizontal: 14,
-      paddingVertical: 10,
-      gap: 8,
-    },
-    lineRow: {
-      flexDirection: "row",
-      alignItems: "center",
-      gap: 10,
-      paddingVertical: 2,
-    },
-    lineName: { fontSize: 12, fontWeight: "600" },
-    lineMeta: { fontSize: 10, marginTop: 1 },
-    lineAmount: { fontSize: 12, fontWeight: "700" },
-
-    clearBtn: {
-      flexDirection: "row",
-      alignItems: "center",
-      justifyContent: "center",
-      gap: 6,
-      padding: 12,
-      marginHorizontal: 12,
-      borderRadius: 10,
-      borderWidth: 1,
-    },
-    clearText: { fontWeight: "600", fontSize: 13 },
-  });
-}
+const styles = StyleSheet.create({
+  container: { flex: 1, backgroundColor: '#f8f8f8' },
+  header: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    backgroundColor: '#fff',
+    borderBottomWidth: 1,
+    borderBottomColor: '#e5e5e5',
+  },
+  title: { fontSize: 18, fontWeight: '700' },
+  exportBtn: {
+    backgroundColor: '#2563eb',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 8,
+  },
+  exportBtnText: { color: '#fff', fontSize: 12, fontWeight: '600' },
+  searchRow: { paddingHorizontal: 12, paddingTop: 8, backgroundColor: '#fff' },
+  searchInput: {
+    backgroundColor: '#f0f0f0',
+    borderRadius: 10,
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    fontSize: 14,
+  },
+  filterScroll: { backgroundColor: '#fff', borderBottomWidth: 1, borderBottomColor: '#eee' },
+  filterChip: {
+    paddingHorizontal: 14,
+    paddingVertical: 6,
+    borderRadius: 20,
+    backgroundColor: '#f0f0f0',
+  },
+  filterChipText: { fontSize: 12, color: '#555', fontWeight: '600' },
+  filterChipTextActive: { color: '#fff' },
+  card: {
+    backgroundColor: '#fff',
+    borderRadius: 12,
+    marginBottom: 8,
+    padding: 12,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    shadowColor: '#000',
+    shadowOpacity: 0.05,
+    shadowRadius: 3,
+    elevation: 1,
+  },
+  refundedCard: { opacity: 0.6 },
+  typeTag: {
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 6,
+    alignSelf: 'flex-start',
+  },
+  typeTagText: { color: '#fff', fontSize: 10, fontWeight: '700' },
+  entryDate: { fontSize: 11, color: '#888' },
+  customerText: { fontSize: 13, fontWeight: '600', color: '#1a1a1a', marginTop: 2 },
+  itemSummary: { fontSize: 12, color: '#666', marginTop: 2 },
+  amountCol: { alignItems: 'flex-end' },
+  amount: { fontSize: 15, fontWeight: '700' },
+  refundedTag: { fontSize: 18, color: '#dc2626' },
+  emptyText: { textAlign: 'center', color: '#aaa', paddingVertical: 40 },
+  rtl: { textAlign: 'right' },
+  // Modal
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.4)',
+    justifyContent: 'flex-end',
+  },
+  modalBox: {
+    backgroundColor: '#fff',
+    borderTopLeftRadius: 20,
+    borderTopRightRadius: 20,
+    padding: 24,
+    maxHeight: '85%',
+  },
+  modalTitle: { fontSize: 18, fontWeight: '700', marginBottom: 12 },
+  detailRow: { fontSize: 13, color: '#555', marginBottom: 6 },
+  sectionLabel: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#1a1a1a',
+    marginTop: 14,
+    marginBottom: 8,
+    textTransform: 'uppercase',
+  },
+  itemRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 6,
+    gap: 8,
+  },
+  itemName: { flex: 1, fontSize: 13, color: '#1a1a1a' },
+  itemQty: { fontSize: 13, color: '#555' },
+  itemPrice: { fontSize: 13, fontWeight: '600', color: '#1a1a1a', minWidth: 60, textAlign: 'right' },
+  divider: { height: 1, backgroundColor: '#eee', marginVertical: 10 },
+  totalRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginBottom: 6,
+  },
+  totalLabel: { fontSize: 13, color: '#555' },
+  totalValue: { fontSize: 14, fontWeight: '700', color: '#1a1a1a' },
+  modalActions: { flexDirection: 'column', gap: 8, marginTop: 16 },
+  actionBtn: {
+    paddingVertical: 12,
+    borderRadius: 12,
+    alignItems: 'center',
+  },
+  actionBtnText: { color: '#fff', fontWeight: '700', fontSize: 14 },
+});
